@@ -2,14 +2,15 @@
 
 import serial
 import re
+import sys
 from prometheus_client import start_http_server, Gauge, Info
 
 WAKE_UP_SEQUENCE = b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00' \
                    b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
 SIGN_ON_SEQUENCE = b'\x2F\x3F\x21\x0D\x0A'
 
-serial_number = None
-version_number = None
+serial_number = ""
+version_number = ""
 
 power_meter_info = Info('power_meter', "Serial and version of power meter")
 power_consumption = Gauge('power_consumption', 'Power consumption in kWh')
@@ -17,7 +18,8 @@ power_failures = Gauge('power_failures', 'Number of power failures', labelnames=
 
 heat_energy_consumption = Gauge('heat_energy_consumption', 'Heat energy consumption in MWh')
 heat_flow = Gauge('heat_flow', 'Heat flow in m^3')
-power_on_hours = Gauge('power_on_hours', 'Power on hours')
+heat_power_on_hours = Gauge('heat_power_on_hours', 'Power on hours')
+heat_error_hours = Gauge('heat_error_hours', "Hours with errors")
 heat_flow_hours = Gauge('heat_flow_hours', 'Hours with heat flow')
 
 
@@ -27,7 +29,7 @@ def process_line(line):
     for match in matches:
         obis_code = match.group(1)
         content = match.group(2)
-        if obis_code == "0.0.0":
+        if obis_code == "0.0.0" or obis_code == "0.0":
             serial_number = content
         elif obis_code == "0.2.1":
             version_number = content
@@ -48,12 +50,15 @@ def process_line(line):
             heat_flow.set(m3)
         elif obis_code == "6.31":
             hours = re.search(r'\d*', content).group()
-            power_on_hours.set(hours)
+            heat_power_on_hours.set(hours)
+        elif obis_code == "6.32":
+            hours = re.search(r'\d*', content).group()
+            heat_error_hours.set(hours)
         elif obis_code == "9.31":
             hours = re.search(r'\d*', content).group()
             heat_flow_hours.set(hours)
-        if serial_number and version_number:
-            power_meter_info.info({'serial': serial_number, 'version': version_number})
+
+        power_meter_info.info({'serial': serial_number, 'version': version_number})
 
 
 def get_baudrate(baudrate_id):
@@ -79,7 +84,7 @@ def process_id(serial_device, id_byte):
 
     print("Manufacturer: " + id_str[0:3])
     print("Device      : " + id_str[4:-2])
-    print("Baudrate    : " + str(baudrate))
+    print("Baudrate    : " + str(baudrate) + "\n")
 
     serial_device.baudrate = baudrate
 
@@ -92,13 +97,29 @@ def login(serial_device):
     serial_device.read_until(b'\x2F')
 
     identification = serial_device.readline()
-    process_id(ser, identification)
+    if len(identification) > 0:
+        if identification[0] == 63:
+            serial_device.read_until(b'\x2F')
+            identification = serial_device.readline()
+        process_id(ser, identification)
+    else:
+        print("Empty identification string.")
 
 
 if __name__ == '__main__':
     print("SmartMeter Exporter v0.1\n")
-    start_http_server(3224)
-    ser = serial.Serial(port='/dev/ttyUSB0',
+    device_name = '/dev/ttyUSB0'
+    server_port = 3223
+    if len(sys.argv) > 1:
+        device_name = sys.argv[1]
+    if len(sys.argv) > 2:
+        server_port = int(sys.argv[2])
+
+    print("Device: " + device_name)
+    print("Port: " + str(server_port) + "\n")
+
+    start_http_server(server_port)
+    ser = serial.Serial(port=device_name,
                         baudrate=300,
                         bytesize=serial.SEVENBITS,
                         parity=serial.PARITY_EVEN,
